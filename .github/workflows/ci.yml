@@ -22,6 +22,10 @@ jobs:
         run: python -m py_compile contextpack.py tests/test_contextpack.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      - name: Install package
+        run: python -m pip install .
+      - name: Installed CLI smoke test
+        run: contextpack --version
       - name: Self-pack smoke test
         run: python contextpack.py pack . --out CONTEXT.md --json context.json
 

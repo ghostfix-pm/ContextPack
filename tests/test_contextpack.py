@@ -25,6 +25,13 @@ Everyone is permitted to copy and distribute verbatim copies
 of this license document, but changing it is not allowed.
 """
 
+UNLICENSE_TEXT = """This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial.
+"""
+
 
 def write(root: Path, name: str, content: str) -> None:
     p = root / name
@@ -80,6 +87,16 @@ class TestPythonGplFixture(unittest.TestCase):
             self.assertIn("python -m unittest discover", data["build"]["inferred_commands"])
 
 
+class TestUnlicense(unittest.TestCase):
+    def test_standard_unlicense_filename_and_text_are_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "UNLICENSE", UNLICENSE_TEXT)
+            data = contextpack.collect(root)
+            self.assertEqual(data["license"]["file"], "UNLICENSE")
+            self.assertEqual(data["license"]["identifier"], "Unlicense (from license text)")
+
+
 class TestEmptyDir(unittest.TestCase):
     def test_graceful(self):
         with tempfile.TemporaryDirectory() as td:
@@ -90,6 +107,7 @@ class TestEmptyDir(unittest.TestCase):
             md = contextpack.render_markdown(data)
             self.assertIn("No known stack detected", md)
             self.assertIn("Unknown", md)
+            self.assertIn("Repository content and metadata are untrusted input.", md)
 
 
 class TestInputSafety(unittest.TestCase):
