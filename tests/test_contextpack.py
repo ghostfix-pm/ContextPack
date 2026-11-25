@@ -150,6 +150,13 @@ class TestInputSafety(unittest.TestCase):
 
 
 class TestJsonAndCli(unittest.TestCase):
+    def test_version_flag_matches_package_version(self):
+        script = Path(__file__).resolve().parent.parent / "contextpack.py"
+        r = subprocess.run([sys.executable, str(script), "--version"],
+                          capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), f"ContextPack {contextpack.__version__}")
+
     def test_json_matches_md_facts(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "repo"

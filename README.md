@@ -52,7 +52,7 @@ python contextpack.py pack <repo-dir> [--out CONTEXT.md] [--json context.json] [
 - Identifier (from file text): **MIT**
 
 ## Stacks
-- **Python** — project `contextpack` v0.1.0, 2 .py files, requires-python >=3.10; pyproject.toml: yes
+- **Python** — project `contextpack` v0.2.0, 2 .py files, requires-python >=3.10; pyproject.toml: yes
 
 ## CI
 - `ci.yml` — name: CI

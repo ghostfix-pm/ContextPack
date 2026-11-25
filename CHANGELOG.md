@@ -2,7 +2,7 @@
 
 All notable changes to ContextPack are documented here.
 
-## Unreleased
+## 0.2.0 — 2026-11-25
 
 - Redact credentials and query strings from URL-style Git remotes.
 - Skip symlinked inputs, quote README TL;DR text as untrusted input, and

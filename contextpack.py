@@ -25,7 +25,7 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # Python 3.10 fallback
     tomllib = None  # type: ignore[assignment]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "target", ".venv",
              "venv", ".tox", ".mypy_cache", ".pytest_cache", "dist",
