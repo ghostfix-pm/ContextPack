@@ -73,6 +73,8 @@ A real-world run on WinDevKit reported: HEAD `882cf43` on branch
 | Python | `pyproject.toml` (tomllib on 3.11+, fallback parser on 3.10), `setup.py`, `requirements.txt`, `*.py` | project name/version, requires-python, dependency counts |
 | .NET | `*.csproj`, `*.sln` | TargetFramework(s), solutions |
 | Java | `pom.xml`, `build.gradle(.kts)`, `*.java` | Maven coordinates or Gradle group/version, declared dependencies |
+| PHP | `composer.json`, `*.php` | package name/version, PHP constraint, runtime/dev requirements, scripts |
+| Ruby | `Gemfile`, `*.gemspec`, `*.rb` | gem name/version, Ruby constraint, declared and locked gems |
 | Node | `package.json` | name, version, script names |
 | Flutter/Dart | `pubspec.yaml`, `*.dart` | package name, SDK constraint, Dart file count |
 | PowerShell | `*.ps1` | script count and paths |
@@ -101,6 +103,8 @@ presence.
 - Go, Maven, and Gradle metadata is also read with bounded text patterns.
   Dependency counts are estimates from declarations; versions are not
   resolved and build files are not fully interpreted.
+- Composer metadata is read from JSON; Ruby Gemfile and gemspec details use
+  bounded text patterns. Counts are estimates and do not resolve dependencies.
 - The scan skips heavy directories (`.git`, `node_modules`, `target`,
   virtualenvs, caches) and symlinks, reads only a bounded amount from
   each text file, and caps the file count; very large repos should raise
