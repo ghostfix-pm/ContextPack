@@ -2,6 +2,11 @@
 
 All notable changes to ContextPack are documented here.
 
+## Unreleased
+
+- Detect Go modules and Java Maven/Gradle builds; infer their build and
+  test commands and document parsing limits.
+
 ## 0.2.0 — 2026-11-25
 
 - Redact credentials and query strings from URL-style Git remotes.

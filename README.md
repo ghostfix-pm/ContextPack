@@ -69,8 +69,10 @@ A real-world run on WinDevKit reported: HEAD `882cf43` on branch
 | Stack | Detected from | Reported |
 |---|---|---|
 | Rust | `Cargo.toml` | package, version, edition, dependency count, workspace members |
+| Go | `go.mod`, `*.go` | module, Go/toolchain version, direct dependency count |
 | Python | `pyproject.toml` (tomllib on 3.11+, fallback parser on 3.10), `setup.py`, `requirements.txt`, `*.py` | project name/version, requires-python, dependency counts |
 | .NET | `*.csproj`, `*.sln` | TargetFramework(s), solutions |
+| Java | `pom.xml`, `build.gradle(.kts)`, `*.java` | Maven coordinates or Gradle group/version, declared dependencies |
 | Node | `package.json` | name, version, script names |
 | Flutter/Dart | `pubspec.yaml`, `*.dart` | package name, SDK constraint, Dart file count |
 | PowerShell | `*.ps1` | script count and paths |
@@ -96,6 +98,9 @@ presence.
   fallback parser handles common manifest shapes, and `pubspec.yaml` /
   workflow `name:` values are read with simple patterns, not full
   parsers.
+- Go, Maven, and Gradle metadata is also read with bounded text patterns.
+  Dependency counts are estimates from declarations; versions are not
+  resolved and build files are not fully interpreted.
 - The scan skips heavy directories (`.git`, `node_modules`, `target`,
   virtualenvs, caches) and symlinks, reads only a bounded amount from
   each text file, and caps the file count; very large repos should raise

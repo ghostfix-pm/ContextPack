@@ -65,6 +65,73 @@ class TestRustFixture(unittest.TestCase):
             self.assertIn("demo-kit", md)
 
 
+class TestGoFixture(unittest.TestCase):
+    def test_go_module_and_commands_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "go.mod", """module example.com/demo
+go 1.22
+toolchain go1.23.1
+require github.com/spf13/cobra v1.8.0
+require (
+    github.com/stretchr/testify v1.9.0
+    golang.org/x/sync v0.7.0 // indirect
+)
+""")
+            write(root, "cmd/demo/main.go", "package main\n")
+            data = contextpack.collect(root)
+            go = data["stacks"]["go"]
+            self.assertEqual(go["module"], "example.com/demo")
+            self.assertEqual(go["go_version"], "1.22")
+            self.assertEqual(go["toolchain"], "go1.23.1")
+            self.assertEqual(go["go_files"], 1)
+            self.assertEqual(go["dependencies_count"], 2)
+            self.assertIn("go test ./...", data["build"]["inferred_commands"])
+            self.assertIn("go build ./...", data["build"]["inferred_commands"])
+
+
+class TestJavaFixtures(unittest.TestCase):
+    def test_maven_coordinates_and_dependency_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pom.xml", """<project>
+  <parent><groupId>parent.group</groupId><artifactId>parent</artifactId><version>9</version></parent>
+  <groupId>com.example</groupId><artifactId>demo</artifactId><version>1.2.3</version>
+  <dependencyManagement><dependencies><dependency><artifactId>managed</artifactId></dependency></dependencies></dependencyManagement>
+  <dependencies><dependency><groupId>org.example</groupId><artifactId>lib</artifactId><version>2</version></dependency></dependencies>
+</project>
+""")
+            write(root, "src/main/java/Demo.java", "class Demo {}\n")
+            data = contextpack.collect(root)
+            java = data["stacks"]["java"]
+            project = java["maven_projects"][0]
+            self.assertEqual(project["group_id"], "com.example")
+            self.assertEqual(project["artifact_id"], "demo")
+            self.assertEqual(project["version"], "1.2.3")
+            self.assertEqual(project["dependencies_count"], 1)
+            self.assertIn("mvn test", data["build"]["inferred_commands"])
+            self.assertIn("mvn package", data["build"]["inferred_commands"])
+
+    def test_gradle_coordinates_and_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "build.gradle.kts", """group = "com.example"
+version = "2.0.0"
+dependencies {
+    implementation("org.example:lib:1.0")
+    testImplementation("org.junit:junit:4.13")
+}
+""")
+            write(root, "src/Main.java", "class Main {}\n")
+            data = contextpack.collect(root)
+            project = data["stacks"]["java"]["gradle_projects"][0]
+            self.assertEqual(project["group"], "com.example")
+            self.assertEqual(project["version"], "2.0.0")
+            self.assertEqual(project["dependencies_count"], 2)
+            self.assertIn("gradle test", data["build"]["inferred_commands"])
+            self.assertIn("gradle build", data["build"]["inferred_commands"])
+
+
 class TestPythonGplFixture(unittest.TestCase):
     def test_python_and_gpl_detected_not_assumed(self):
         with tempfile.TemporaryDirectory() as td:
