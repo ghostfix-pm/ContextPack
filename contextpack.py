@@ -251,6 +251,147 @@ def detect_rust(root: Path, files: list[Path]) -> dict | None:
     }
 
 
+def detect_go(root: Path, files: list[Path]) -> dict | None:
+    manifests = sorted(
+        (p for p in files if p.name == "go.mod"),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    go_files = [p for p in files if p.suffix.lower() == ".go"]
+    if not manifests and not go_files:
+        return None
+
+    module = go_version = toolchain = None
+    dependencies = 0
+    if manifests:
+        for raw in read_text(manifests[0], 50_000).splitlines():
+            line = raw.strip()
+            match = re.match(r"^module\s+(\S+)", line)
+            if match:
+                module = match.group(1)
+            match = re.match(r"^go\s+(\S+)", line)
+            if match:
+                go_version = match.group(1)
+            match = re.match(r"^toolchain\s+(\S+)", line)
+            if match:
+                toolchain = match.group(1)
+
+        in_require_block = False
+        for raw in read_text(manifests[0], 50_000).splitlines():
+            line = raw.strip()
+            if line.startswith("require ("):
+                in_require_block = True
+                continue
+            if in_require_block:
+                if line == ")":
+                    in_require_block = False
+                elif line and not line.startswith("//") and "// indirect" not in line:
+                    dependencies += 1
+            else:
+                match = re.match(r"^require\s+\S+\s+\S+(.*)$", line)
+                if match and "// indirect" not in match.group(1):
+                    dependencies += 1
+
+    return {
+        "manifest": rel(root, manifests[0]) if manifests else None,
+        "manifest_count": len(manifests),
+        "module": module,
+        "go_version": go_version,
+        "toolchain": toolchain,
+        "dependencies_count": dependencies if manifests else None,
+        "go_files": len(go_files),
+    }
+
+
+def _maven_value(text: str, tag: str) -> str | None:
+    # Ignore the parent block so inherited coordinates are not misreported.
+    text = re.sub(r"<parent\b[^>]*>.*?</parent>", "", text, flags=re.I | re.S)
+    match = re.search(
+        rf"<{tag}(?:\s[^>]*)?>\s*([^<]+?)\s*</{tag}\s*>", text, re.I
+    )
+    return match.group(1).strip() if match else None
+
+
+def _maven_dependency_count(text: str) -> int:
+    # Dependency management declares versions, not project dependencies.
+    text = re.sub(
+        r"<dependencyManagement\b[^>]*>.*?</dependencyManagement>",
+        "",
+        text,
+        flags=re.I | re.S,
+    )
+    blocks = re.findall(
+        r"<dependencies\b[^>]*>(.*?)</dependencies>", text, flags=re.I | re.S
+    )
+    return sum(
+        len(re.findall(r"<dependency(?:\s[^>]*)?>", block, flags=re.I))
+        for block in blocks
+    )
+
+
+def _gradle_value(text: str, key: str) -> str | None:
+    match = re.search(
+        rf"^\s*{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]",
+        text,
+        flags=re.M,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _gradle_dependency_count(text: str) -> int | None:
+    match = re.search(
+        r"\bdependencies\s*\{(.*?)^\s*\}", text, flags=re.I | re.S | re.M
+    )
+    if not match:
+        return None
+    configurations = (
+        "implementation|api|compileOnly|runtimeOnly|testImplementation|"
+        "testCompileOnly|testRuntimeOnly|annotationProcessor|kapt|compile|"
+        "runtime|testCompile"
+    )
+    return len(re.findall(
+        rf"^\s*(?:{configurations})\s*(?:\(|\s)",
+        match.group(1),
+        flags=re.I | re.M,
+    ))
+
+
+def detect_java(root: Path, files: list[Path]) -> dict | None:
+    maven_files = sorted(p for p in files if p.name == "pom.xml")
+    gradle_files = sorted(
+        p for p in files if p.name in ("build.gradle", "build.gradle.kts")
+    )
+    java_files = [p for p in files if p.suffix.lower() == ".java"]
+    if not maven_files and not gradle_files and not java_files:
+        return None
+
+    maven_projects = []
+    for path in maven_files[:10]:
+        text = read_text(path, 50_000)
+        maven_projects.append({
+            "file": rel(root, path),
+            "group_id": _maven_value(text, "groupId"),
+            "artifact_id": _maven_value(text, "artifactId"),
+            "version": _maven_value(text, "version"),
+            "dependencies_count": _maven_dependency_count(text),
+        })
+
+    gradle_projects = []
+    for path in gradle_files[:10]:
+        text = read_text(path, 50_000)
+        gradle_projects.append({
+            "file": rel(root, path),
+            "group": _gradle_value(text, "group"),
+            "version": _gradle_value(text, "version"),
+            "dependencies_count": _gradle_dependency_count(text),
+        })
+
+    return {
+        "java_files": len(java_files),
+        "maven_projects": maven_projects,
+        "gradle_projects": gradle_projects,
+    }
+
+
 def detect_python(root: Path, files: list[Path]) -> dict | None:
     pyproject = root / "pyproject.toml"
     has_pyproject = is_regular_file(pyproject, root)
@@ -390,6 +531,13 @@ def detect_build(root: Path, files: list[Path], stacks: dict) -> dict:
     inferred: list[str] = []
     if stacks.get("rust"):
         inferred += ["cargo build", "cargo test"]
+    if stacks.get("go"):
+        inferred += ["go build ./...", "go test ./..."]
+    java = stacks.get("java", {})
+    if java.get("maven_projects"):
+        inferred += ["mvn package", "mvn test"]
+    if java.get("gradle_projects"):
+        inferred += ["gradle build", "gradle test"]
     if stacks.get("dotnet"):
         inferred += ["dotnet build", "dotnet test"]
     if stacks.get("python"):
@@ -454,7 +602,8 @@ def collect(root: Path, max_files: int = 400) -> dict:
     git = git_info(root) if root.is_dir() else {"is_repo": False, "remote_origin": None,
                                                "branch": None, "head": None, "dirty_count": None}
     stacks: dict = {}
-    for key, fn in (("rust", detect_rust), ("python", detect_python),
+    for key, fn in (("rust", detect_rust), ("go", detect_go),
+                    ("java", detect_java), ("python", detect_python),
                     ("dotnet", detect_dotnet), ("node", detect_node),
                     ("flutter", detect_flutter), ("powershell", detect_powershell)):
         val = fn(root, files) if root.is_dir() else None
@@ -523,6 +672,44 @@ def render_markdown(d: dict) -> str:
                        f"{r['dependencies_count']} direct dependencies in root manifest")
         if r.get("workspace_members"):
             lines.append(f"  - Workspace members: {', '.join(map(str, r['workspace_members']))}")
+    if "go" in stacks:
+        g = stacks["go"]
+        details = [f"{g['go_files']} .go files"]
+        if g.get("module"):
+            details.insert(0, f"module `{g['module']}`")
+        if g.get("go_version"):
+            details.append(f"Go {g['go_version']}")
+        if g.get("toolchain"):
+            details.append(f"toolchain {g['toolchain']}")
+        if g.get("dependencies_count") is not None:
+            details.append(f"{g['dependencies_count']} direct dependencies")
+        manifest = f"`{g['manifest']}`" if g.get("manifest") else "no go.mod"
+        lines.append(f"- **Go** — {manifest}: " + ", ".join(details))
+        if g.get("manifest_count", 0) > 1:
+            lines.append(f"  - {g['manifest_count']} go.mod files found")
+    if "java" in stacks:
+        j = stacks["java"]
+        lines.append(f"- **Java** — {j['java_files']} .java files")
+        for project in j["maven_projects"]:
+            coords = ":".join(
+                str(value) for value in
+                (project.get("group_id"), project.get("artifact_id"))
+                if value
+            ) or "coordinates unknown"
+            lines.append(
+                f"  - Maven `{project['file']}` — {coords}, "
+                f"version {_v(project.get('version'))}, "
+                f"{project['dependencies_count']} declared dependencies"
+            )
+        for project in j["gradle_projects"]:
+            lines.append(
+                f"  - Gradle `{project['file']}` — group {_v(project.get('group'))}, "
+                f"version {_v(project.get('version'))}, "
+                f"{_v(project.get('dependencies_count'), 'dependency count unknown')} "
+                f"declared dependencies"
+            )
+        if not j["maven_projects"] and not j["gradle_projects"]:
+            lines.append("  - No Maven or Gradle build file detected.")
     if "python" in stacks:
         p = stacks["python"]
         bits = [f"{p['python_files']} .py files"]
