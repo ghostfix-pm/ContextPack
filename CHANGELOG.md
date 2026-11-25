@@ -4,6 +4,20 @@ All notable changes to ContextPack are documented here.
 
 ## Unreleased
 
+- Detect C/C++ CMake projects: `project()` name/version/languages,
+  `cmake_minimum_required`, executable/library/subdirectory counts and
+  whether tests are configured, plus inferred `cmake`/`ctest` commands.
+- Read Maven coordinates from the project element only — versions and
+  artifact ids inside `<dependencies>`, `<build>` or `<profiles>` can no
+  longer be reported as the project's own — and label coordinate values
+  inherited from `<parent>`.
+- Read the Flutter/Dart SDK constraint from the `environment:` block
+  instead of the first `sdk:` key, which is `sdk: flutter` in the
+  dependency block of many pubspecs.
+- Report gemspec development dependencies separately from runtime gems.
+- Parse multi-line TOML arrays (and both quote styles) in the Python 3.10
+  fallback parser instead of keeping a dangling `[`.
+- Only a column-zero `name:` counts as a workflow name.
 - Detect Go modules and Java Maven/Gradle builds; infer their build and
   test commands and document parsing limits.
 - Detect PHP Composer and Ruby Bundler projects, report manifest and lock

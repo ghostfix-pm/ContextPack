@@ -79,6 +79,7 @@ A real-world run on WinDevKit reported: HEAD `882cf43` on branch
 | Ruby | `Gemfile`, `*.gemspec`, `*.rb` | gem name/version, Ruby constraint, declared and locked gems |
 | Node | `package.json` | name, version, script names |
 | Flutter/Dart | `pubspec.yaml`, `*.dart` | package name, SDK constraint, Dart file count |
+| C/C++ | `CMakeLists.txt`, `*.c/*.cc/*.cpp/*.cxx`, `*.h/*.hpp` | project name/version, `cmake_minimum_required`, languages, executable/library/subdirectory counts, whether tests are configured |
 | PowerShell | `*.ps1` | script count and paths |
 
 Also detected regardless of stack: git remote/branch/HEAD/dirty count,
@@ -109,6 +110,9 @@ presence.
   bounded text patterns. Counts are estimates and do not resolve dependencies.
 - Kotlin Gradle/Maven metadata and Swift package declarations use bounded
   text patterns; Xcode scheme details are not resolved automatically.
+- CMake metadata comes from the top-level `CMakeLists.txt` only: `project()`
+  arguments are read literally (variables are not expanded), and
+  `add_subdirectory` calls are counted, not followed.
 - The scan skips heavy directories (`.git`, `node_modules`, `target`,
   virtualenvs, caches) and symlinks, reads only a bounded amount from
   each text file, and caps the file count; very large repos should raise

@@ -478,5 +478,192 @@ class TestJsonAndCli(unittest.TestCase):
             self.assertEqual(contextpack.main(["pack", str(missing)]), 2)
 
 
+class TestCMakeFixture(unittest.TestCase):
+    CMAKE = """cmake_minimum_required(VERSION 3.20...3.28)
+project("demo app" VERSION 1.4.2 LANGUAGES C CXX)
+add_library(core src/core.cpp)
+add_executable(app src/main.cpp)
+add_subdirectory(lib)
+enable_testing()
+add_test(NAME smoke COMMAND app)
+"""
+
+    def test_cmake_project_is_detected_with_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "CMakeLists.txt", self.CMAKE)
+            write(root, "src/core.cpp", "int f() { return 1; }\n")
+            write(root, "include/core.hpp", "#pragma once\n")
+            data = contextpack.collect(root)
+            cmake = data["stacks"]["cmake"]
+            self.assertEqual(cmake["manifest"], "CMakeLists.txt")
+            self.assertEqual(cmake["name"], "demo app")
+            self.assertEqual(cmake["version"], "1.4.2")
+            self.assertEqual(cmake["min_version"], "3.20...3.28")
+            self.assertEqual(cmake["languages"], ["C", "CXX"])
+            self.assertEqual(cmake["executables"], 1)
+            self.assertEqual(cmake["libraries"], 1)
+            self.assertEqual(cmake["subdirectories"], 1)
+            self.assertTrue(cmake["has_tests"])
+            self.assertEqual(cmake["source_files"], 2)
+            commands = data["build"]["inferred_commands"]
+            self.assertIn("cmake -S . -B build", commands)
+            self.assertIn("cmake --build build", commands)
+            self.assertIn("ctest --test-dir build --output-on-failure", commands)
+            md = contextpack.render_markdown(data)
+            self.assertIn("**C/C++ (CMake)**", md)
+            self.assertIn("project `demo app` v1.4.2", md)
+
+    def test_sources_without_manifest_do_not_infer_cmake_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "src/app.c", "int main(void) { return 0; }\n")
+            data = contextpack.collect(root)
+            cmake = data["stacks"]["cmake"]
+            self.assertIsNone(cmake["manifest"])
+            self.assertEqual(cmake["source_files"], 1)
+            self.assertFalse(cmake["has_tests"])
+            self.assertEqual(data["build"]["inferred_commands"], [])
+            self.assertIn("no CMakeLists.txt", contextpack.render_markdown(data))
+
+    def test_cmake_without_tests_omits_ctest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "CMakeLists.txt",
+                  "cmake_minimum_required(VERSION 3.16)\n"
+                  "project(tiny C)\nadd_executable(tiny main.c)\n")
+            write(root, "main.c", "int main(void) { return 0; }\n")
+            commands = contextpack.collect(root)["build"]["inferred_commands"]
+            self.assertIn("cmake --build build", commands)
+            self.assertNotIn("ctest --test-dir build --output-on-failure", commands)
+
+
+class TestMavenCoordinates(unittest.TestCase):
+    def test_child_module_inherits_parent_and_ignores_dependency_versions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pom.xml", """<project>
+  <parent>
+    <groupId>com.example</groupId><artifactId>parent</artifactId><version>2.1.0</version>
+  </parent>
+  <artifactId>child</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>1.7.36</version>
+    </dependency>
+  </dependencies>
+</project>
+""")
+            project = contextpack.collect(root)["stacks"]["java"]["maven_projects"][0]
+            self.assertEqual(project["group_id"], "com.example")
+            self.assertEqual(project["artifact_id"], "child")
+            self.assertEqual(project["version"], "2.1.0")
+            self.assertEqual(project["dependencies_count"], 1)
+            self.assertEqual(project["inherited_from_parent"], ["groupId", "version"])
+            md = contextpack.render_markdown(contextpack.collect(root))
+            self.assertIn("com.example:child (from parent)", md)
+            self.assertIn("version 2.1.0 (from parent)", md)
+            self.assertNotIn("1.7.36", md)
+
+    def test_plugin_and_build_versions_never_become_project_coordinates(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pom.xml", """<project>
+  <artifactId>tool</artifactId>
+  <build><plugins><plugin><artifactId>maven-jar-plugin</artifactId><version>3.4.1</version></plugin></plugins></build>
+</project>
+""")
+            project = contextpack.collect(root)["stacks"]["java"]["maven_projects"][0]
+            self.assertEqual(project["artifact_id"], "tool")
+            self.assertIsNone(project["version"])
+            self.assertEqual(project["inherited_from_parent"], [])
+
+
+class TestPubspecEnvironment(unittest.TestCase):
+    def test_sdk_is_read_from_environment_not_from_the_flutter_dependency(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pubspec.yaml", """name: demo_app
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+environment:
+  sdk: '>=3.4.0 <4.0.0'  # comment
+""")
+            write(root, "lib/main.dart", "void main() {}\n")
+            flutter = contextpack.collect(root)["stacks"]["flutter"]
+            self.assertEqual(flutter["name"], "demo_app")
+            self.assertEqual(flutter["sdk_constraint"], ">=3.4.0 <4.0.0")
+            self.assertIn("SDK constraint >=3.4.0 <4.0.0",
+                          contextpack.render_markdown(contextpack.collect(root)))
+
+    def test_missing_environment_block_reports_unknown(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pubspec.yaml",
+                  "name: plain\ndependencies:\n  flutter:\n    sdk: flutter\n")
+            flutter = contextpack.collect(root)["stacks"]["flutter"]
+            self.assertIsNone(flutter["sdk_constraint"])
+
+
+class TestRubyDevelopmentDependencies(unittest.TestCase):
+    def test_gemspec_development_dependencies_are_counted_separately(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "demo.gemspec", """Gem::Specification.new do |spec|
+  spec.name = "demo"
+  spec.version = "0.3.0"
+  spec.add_dependency "rake", "~> 13"
+  spec.add_development_dependency("rspec", "~> 3")
+  spec.add_development_dependency "rubocop"
+end
+""")
+            write(root, "Gemfile", "source \"https://rubygems.org\"\ngem \"rake\"\n")
+            write(root, "lib/demo.rb", "")
+            ruby = contextpack.collect(root)["stacks"]["ruby"]
+            self.assertEqual(ruby["dependencies_count"], 1)
+            self.assertEqual(ruby["dev_dependencies_count"], 2)
+            self.assertEqual(ruby["dev_dependencies"], ["rspec", "rubocop"])
+            self.assertIn("2 development gems",
+                          contextpack.render_markdown(contextpack.collect(root)))
+
+
+class TestSimpleTomlArrays(unittest.TestCase):
+    def test_multiline_dependency_array_is_parsed(self):
+        data = contextpack._simple_toml(
+            '[project]\nname = "demo"\nrequires-python = ">=3.10"\n'
+            'dependencies = [\n  "requests>=2",   # http\n  \'click>=8\',\n]\n'
+            '[project.optional-dependencies]\ndev = ["pytest"]\n'
+        )
+        self.assertEqual(data["project"]["dependencies"],
+                         ["requests>=2", "click>=8"])
+        self.assertEqual(data["project"]["optional-dependencies"]["dev"],
+                         ["pytest"])
+
+    def test_comment_only_line_and_trailing_comment_do_not_break_scalars(self):
+        data = contextpack._simple_toml(
+            '[package]\nname = "fb" # the name\nversion = "0.1.0"\n')
+        self.assertEqual(data["package"]["name"], "fb")
+        self.assertEqual(data["package"]["version"], "0.1.0")
+
+
+class TestWorkflowName(unittest.TestCase):
+    def test_step_name_is_not_reported_as_the_workflow_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, ".github/workflows/ci.yml",
+                  "on: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                  "    steps:\n      - run: echo hi\n        name: Run tests\n")
+            self.assertEqual(contextpack.collect(root)["ci"],
+                             [{"file": "ci.yml", "name": None}])
+
+    def test_quoted_top_level_name_is_unquoted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, ".github/workflows/ci.yml", 'name: "Release" # yup\non: [push]\n')
+            self.assertEqual(contextpack.collect(root)["ci"][0]["name"], "Release")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -199,12 +199,55 @@ def load_toml(path: Path) -> dict:
     return _simple_toml(read_text(path))
 
 
+_TOML_STRING = re.compile(r"\"([^\"]*)\"|'([^']*)'")
+
+
+def _toml_strings(value: str) -> list[str]:
+    return [m.group(1) if m.group(1) is not None else m.group(2)
+            for m in _TOML_STRING.finditer(value)]
+
+
+def _strip_toml_comment(value: str) -> str:
+    """Drop a trailing comment, honouring quoted segments."""
+    quote = None
+    for index, char in enumerate(value):
+        if quote is None and char in "\"'":
+            quote = char
+        elif quote == char:
+            quote = None
+        elif quote is None and char == "#":
+            return value[:index].rstrip()
+    return value
+
+
+def _logical_toml_lines(text: str) -> list[str]:
+    """Join array values that continue over several physical lines."""
+    out: list[str] = []
+    pending: str | None = None
+    for raw in text.splitlines():
+        line = _strip_toml_comment(raw.strip())
+        if pending is not None:
+            pending = f"{pending} {line}"
+            if pending.count("[") <= pending.count("]"):
+                out.append(pending)
+                pending = None
+            continue
+        if "=" in line:
+            value = line.partition("=")[2].strip()
+            if value.startswith("[") and value.count("[") > value.count("]"):
+                pending = line
+                continue
+        out.append(line)
+    if pending is not None:
+        out.append(pending)
+    return out
+
+
 def _simple_toml(text: str) -> dict:
     """Very small TOML subset parser: sections, strings, ints, arrays."""
     data: dict = {}
     current = data
-    for raw in text.splitlines():
-        line = raw.strip()
+    for line in _logical_toml_lines(text):
         if not line or line.startswith("#"):
             continue
         m = re.match(r"^\[([^\]]+)\]$", line)
@@ -215,12 +258,11 @@ def _simple_toml(text: str) -> dict:
             continue
         m = re.match(r"^([A-Za-z0-9_-]+)\s*=\s*(.+)$", line)
         if m:
-            key, val = m.group(1), m.group(2).strip()
-            if val.startswith('"') and val.endswith('"'):
+            key, val = m.group(1), _strip_toml_comment(m.group(2).strip())
+            if val.startswith('"') and val.endswith('"') and len(val) > 1:
                 current[key] = val[1:-1]
             elif val.startswith("[") and val.endswith("]"):
-                items = re.findall(r'"([^"]*)"', val)
-                current[key] = items
+                current[key] = _toml_strings(val)
             elif re.fullmatch(r"-?\d+", val):
                 current[key] = int(val)
             elif val in ("true", "false"):
@@ -302,13 +344,71 @@ def detect_go(root: Path, files: list[Path]) -> dict | None:
     }
 
 
-def _maven_value(text: str, tag: str) -> str | None:
-    # Ignore the parent block so inherited coordinates are not misreported.
-    text = re.sub(r"<parent\b[^>]*>.*?</parent>", "", text, flags=re.I | re.S)
+MAVEN_NESTED_BLOCKS = (
+    "parent", "dependencies", "dependencyManagement", "build", "profiles",
+    "reporting", "distributionManagement", "repositories",
+    "pluginRepositories", "properties", "modules", "licenses", "developers",
+    "contributors", "organization", "issueManagement", "ciManagement",
+    "mailingLists", "prerequisites", "scm",
+)
+
+
+def _strip_xml_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+
+def _strip_xml_blocks(text: str, tags: tuple[str, ...]) -> str:
+    for tag in tags:
+        text = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}\s*>", "", text, flags=re.I | re.S
+        )
+    return text
+
+
+def _xml_value(text: str, tag: str) -> str | None:
     match = re.search(
         rf"<{tag}(?:\s[^>]*)?>\s*([^<]+?)\s*</{tag}\s*>", text, re.I
     )
     return match.group(1).strip() if match else None
+
+
+def _maven_coordinates(text: str) -> tuple[dict, list[str]]:
+    """Project-level coordinates only.
+
+    Versions and artifact ids declared inside ``<dependencies>``,
+    ``<build>`` or other nested blocks belong to something else and must
+    never be reported as the project's own. Missing groupId/version are
+    filled from ``<parent>`` (real Maven inheritance) and flagged.
+    """
+    text = _strip_xml_comments(text)
+    project_match = re.search(
+        r"<project\b[^>]*>(.*)</project\s*>", text, flags=re.I | re.S
+    )
+    project_text = project_match.group(1) if project_match else text
+    parent_match = re.search(
+        r"<parent\b[^>]*>(.*?)</parent\s*>", project_text, flags=re.I | re.S
+    )
+    parent_text = parent_match.group(1) if parent_match else ""
+    own_text = _strip_xml_blocks(project_text, MAVEN_NESTED_BLOCKS)
+    coords = {
+        "group_id": _xml_value(own_text, "groupId"),
+        "artifact_id": _xml_value(own_text, "artifactId"),
+        "version": _xml_value(own_text, "version"),
+    }
+    inherited: list[str] = []
+    for key, tag in (("group_id", "groupId"), ("version", "version")):
+        if coords[key] is None:
+            inherited_value = _xml_value(parent_text, tag)
+            if inherited_value is not None:
+                coords[key] = inherited_value
+                inherited.append(tag)
+    return coords, inherited
+
+
+def _maven_value(text: str, tag: str) -> str | None:
+    """Value of a project-level tag, ignoring nested blocks such as the parent."""
+    own_text = _strip_xml_blocks(_strip_xml_comments(text), MAVEN_NESTED_BLOCKS)
+    return _xml_value(own_text, tag)
 
 
 def _maven_dependency_count(text: str) -> int:
@@ -394,12 +494,12 @@ def detect_java(root: Path, files: list[Path]) -> dict | None:
     maven_projects = []
     for path in maven_files[:10]:
         text = read_text(path, 50_000)
+        coordinates, inherited = _maven_coordinates(text)
         maven_projects.append({
             "file": rel(root, path),
-            "group_id": _maven_value(text, "groupId"),
-            "artifact_id": _maven_value(text, "artifactId"),
-            "version": _maven_value(text, "version"),
+            **coordinates,
             "dependencies_count": _maven_dependency_count(text),
+            "inherited_from_parent": inherited,
         })
 
     gradle_projects = []
@@ -653,14 +753,20 @@ def detect_ruby(root: Path, files: list[Path]) -> dict | None:
     ruby_version_match = re.search(
         r"^\s*ruby\s+['\"]([^'\"]+)['\"]", gemfile_text, flags=re.M
     )
-    gem_names.update(
-        name
-        for gemspec in gemspecs
-        for name in re.findall(
-            r"\b(?:spec|s)\.add_(?:runtime_)?dependency\s+['\"]([^'\"]+)['\"]",
-            read_text(gemspec, 50_000),
-        )
-    )
+    dev_gem_names: set[str] = set()
+    for gemspec in gemspecs:
+        spec_text = read_text(gemspec, 50_000)
+        gem_names.update(re.findall(
+            r"\b(?:spec|s)\.add_(?:runtime_)?dependency"
+            r"\s*\(?\s*['\"]([^'\"]+)['\"]",
+            spec_text,
+        ))
+        dev_gem_names.update(re.findall(
+            r"\b(?:spec|s)\.add_development_dependency"
+            r"\s*\(?\s*['\"]([^'\"]+)['\"]",
+            spec_text,
+        ))
+    dev_gem_names -= gem_names
     name = version = None
     if gemspecs:
         text = read_text(gemspecs[0], 50_000)
@@ -696,6 +802,8 @@ def detect_ruby(root: Path, files: list[Path]) -> dict | None:
         "ruby_constraint": ruby_version_match.group(1) if ruby_version_match else None,
         "dependencies_count": len(gem_names),
         "direct_dependencies": sorted(gem_names)[:10],
+        "dev_dependencies_count": len(dev_gem_names),
+        "dev_dependencies": sorted(dev_gem_names)[:10],
         "lockfile": "Gemfile.lock" if is_regular_file(lockfile, root) else None,
         "locked_dependencies_count": locked_count,
         "ruby_files": len(ruby_files),
@@ -746,6 +854,64 @@ def detect_dotnet(root: Path, files: list[Path]) -> dict | None:
     return {"projects": projects, "solutions": [rel(root, p) for p in sorted(slns)]}
 
 
+CMAKE_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++",
+}
+
+
+def _cmake_call_args(text: str, command: str) -> str | None:
+    match = re.search(
+        rf"\b{command}\s*\(([^)]*)\)", text, flags=re.I | re.S
+    )
+    return match.group(1) if match else None
+
+
+def detect_cmake(root: Path, files: list[Path]) -> dict | None:
+    manifests = sorted(
+        (p for p in files if p.name == "CMakeLists.txt"),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    source_files = [p for p in files if p.suffix.lower() in CMAKE_SOURCE_SUFFIXES]
+    modules = [p for p in files if p.suffix.lower() == ".cmake"]
+    if not manifests and not source_files:
+        return None
+
+    text = read_text(manifests[0], 50_000) if manifests else ""
+    project_args = _cmake_call_args(text, "project") or ""
+    tokens = [
+        token[1:-1] if token.startswith('"') and token.endswith('"') else token
+        for token in re.findall(r'"[^"]*"|\S+', project_args.strip())
+    ]
+    upper = [token.upper() for token in tokens]
+    name = tokens[0] if tokens else None
+    version = None
+    if "VERSION" in upper and upper.index("VERSION") + 1 < len(tokens):
+        version = tokens[upper.index("VERSION") + 1]
+    languages: list[str] = []
+    if "LANGUAGES" in upper:
+        languages = tokens[upper.index("LANGUAGES") + 1:]
+    minimum = _cmake_call_args(text, "cmake_minimum_required")
+    min_match = re.search(r"VERSION\s+([\d.]+(?:\.\.\.[\d.]+)?)", minimum or "", re.I)
+    has_tests = bool(
+        re.search(r"\benable_testing\s*\(\s*\)", text, re.I)
+        or re.search(r"\binclude\s*\(\s*CTest\s*\)", text, re.I)
+    )
+    return {
+        "manifest": rel(root, manifests[0]) if manifests else None,
+        "manifest_count": len(manifests),
+        "name": name,
+        "version": version,
+        "min_version": min_match.group(1) if min_match else None,
+        "languages": languages,
+        "executables": len(re.findall(r"\badd_executable\s*\(", text, re.I)),
+        "libraries": len(re.findall(r"\badd_library\s*\(", text, re.I)),
+        "subdirectories": len(re.findall(r"\badd_subdirectory\s*\(", text, re.I)),
+        "has_tests": has_tests,
+        "cmake_modules": len(modules),
+        "source_files": len(source_files),
+    }
+
+
 def detect_node(root: Path, files: list[Path]) -> dict | None:
     pkg_path = root / "package.json"
     if not is_regular_file(pkg_path, root):
@@ -761,19 +927,51 @@ def detect_node(root: Path, files: list[Path]) -> dict | None:
             "scripts": data.get("scripts", {}) if isinstance(data.get("scripts"), dict) else {}}
 
 
+def _yaml_scalar(value: str) -> str:
+    """Trim quotes, indentation and a trailing comment from a YAML scalar."""
+    value = value.strip()
+    quote = None
+    for index, char in enumerate(value):
+        if quote is None and char in "\"'":
+            quote = char
+        elif quote == char:
+            quote = None
+        elif quote is None and char == "#":
+            value = value[:index].rstrip()
+            break
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value.strip()
+
+
+def _yaml_block(text: str, key: str) -> str:
+    """Indented block under a top-level YAML key, or "" when absent."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(rf"^{re.escape(key)}\s*:\s*$", line):
+            block = []
+            for child in lines[index + 1:]:
+                if child.strip() and not child[:1].isspace():
+                    break
+                block.append(child)
+            return "\n".join(block)
+    return ""
+
+
 def detect_flutter(root: Path, files: list[Path]) -> dict | None:
     pub = root / "pubspec.yaml"
     if not is_regular_file(pub, root):
         return None
     text = read_text(pub)
     name = None
-    m = re.search(r"^name:\s*(.+)$", text, re.M)
+    m = re.match(r"^name\s*:\s*(.+)$", text, re.M)
     if m:
-        name = m.group(1).strip()
+        name = _yaml_scalar(m.group(1))
+    environment = _yaml_block(text, "environment")
     sdk = None
-    m = re.search(r"^\s*sdk:\s*(.+)$", text, re.M)
+    m = re.search(r"^\s+sdk\s*:\s*(.+)$", environment, re.M)
     if m:
-        sdk = m.group(1).strip().strip('"\'')
+        sdk = _yaml_scalar(m.group(1))
     dart_files = len([p for p in files if p.suffix == ".dart"])
     return {"pubspec": "pubspec.yaml", "name": name, "sdk_constraint": sdk,
             "dart_files": dart_files}
@@ -819,9 +1017,9 @@ def detect_ci(root: Path) -> list[dict]:
             if p.suffix in (".yml", ".yaml") and is_regular_file(p, root):
                 name = None
                 for ln in read_text(p, 20_000).splitlines():
-                    m = re.match(r"^name:\s*(.+)$", ln.strip())
+                    m = re.match(r"^name\s*:\s*(.+)$", ln)
                     if m:
-                        name = m.group(1).strip().strip('"\'')
+                        name = _yaml_scalar(m.group(1))
                         break
                 out.append({"file": p.name, "name": name})
     return out
@@ -872,6 +1070,11 @@ def detect_build(root: Path, files: list[Path], stacks: dict) -> dict:
             inferred.append("bundle exec rspec")
     if stacks.get("dotnet"):
         inferred += ["dotnet build", "dotnet test"]
+    cmake = stacks.get("cmake", {})
+    if cmake.get("manifest"):
+        inferred += ["cmake -S . -B build", "cmake --build build"]
+        if cmake.get("has_tests"):
+            inferred.append("ctest --test-dir build --output-on-failure")
     if stacks.get("python"):
         has_tests = any(p.name.startswith("test_") or p.name.endswith("_test.py")
                         or "tests" in p.parts for p in files)
@@ -938,7 +1141,8 @@ def collect(root: Path, max_files: int = 400) -> dict:
                     ("java", detect_java), ("kotlin", detect_kotlin),
                     ("swift", detect_swift), ("php", detect_php),
                     ("ruby", detect_ruby), ("python", detect_python),
-                    ("dotnet", detect_dotnet), ("node", detect_node),
+                    ("dotnet", detect_dotnet), ("cmake", detect_cmake),
+                    ("node", detect_node),
                     ("flutter", detect_flutter), ("powershell", detect_powershell)):
         val = fn(root, files) if root.is_dir() else None
         if val is not None:
@@ -965,6 +1169,10 @@ def collect(root: Path, max_files: int = 400) -> dict:
 # ---------------------------------------------------------------- render
 def _v(val, fallback="Unknown"):
     return fallback if val is None or val == "" else val
+
+
+def _count_label(count: int, singular: str, plural: str | None = None) -> str:
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
 def render_markdown(d: dict) -> str:
@@ -1030,9 +1238,12 @@ def render_markdown(d: dict) -> str:
                 (project.get("group_id"), project.get("artifact_id"))
                 if value
             ) or "coordinates unknown"
+            inherited = project.get("inherited_from_parent") or []
+            version_note = " (from parent)" if "version" in inherited else ""
+            group_note = " (from parent)" if "groupId" in inherited else ""
             lines.append(
-                f"  - Maven `{project['file']}` — {coords}, "
-                f"version {_v(project.get('version'))}, "
+                f"  - Maven `{project['file']}` — {coords}{group_note}, "
+                f"version {_v(project.get('version'))}{version_note}, "
                 f"{project['dependencies_count']} declared dependencies"
             )
         for project in j["gradle_projects"]:
@@ -1108,6 +1319,8 @@ def render_markdown(d: dict) -> str:
         if r.get("ruby_constraint"):
             details.append(f"requires Ruby {r['ruby_constraint']}")
         details.append(f"{r['dependencies_count']} declared gems")
+        if r.get("dev_dependencies_count"):
+            details.append(f"{r['dev_dependencies_count']} development gems")
         if r.get("locked_dependencies_count") is not None:
             details.append(f"{r['locked_dependencies_count']} locked gems")
         lines.append(f"- **Ruby** — {manifest}: " + ", ".join(details))
@@ -1133,6 +1346,27 @@ def render_markdown(d: dict) -> str:
             lines.append(f"  - `{pr['file']}` — TargetFramework: {_v(pr['target_framework'])}")
         for s in stacks["dotnet"]["solutions"]:
             lines.append(f"  - Solution: `{s}`")
+    if "cmake" in stacks:
+        c = stacks["cmake"]
+        manifest = f"`{c['manifest']}`" if c.get("manifest") else "no CMakeLists.txt"
+        details = []
+        if c.get("name"):
+            details.append(f"project `{c['name']}`"
+                           + (f" v{c['version']}" if c.get("version") else ""))
+        if c.get("min_version"):
+            details.append(f"cmake_minimum_required {c['min_version']}")
+        if c.get("languages"):
+            details.append("languages " + ", ".join(c["languages"]))
+        if c.get("executables") or c.get("libraries"):
+            details.append(f"{_count_label(c['executables'], 'executable')}, "
+                           f"{_count_label(c['libraries'], 'library', 'libraries')}")
+        if c.get("subdirectories"):
+            details.append(_count_label(c["subdirectories"], "subdirectory",
+                                        "subdirectories"))
+        details.append("tests configured" if c.get("has_tests")
+                       else "no tests configured")
+        details.append(_count_label(c["source_files"], "C/C++ source and header file"))
+        lines.append(f"- **C/C++ (CMake)** — {manifest}: " + ", ".join(details))
     if "node" in stacks:
         n = stacks["node"]
         lines.append(f"- **Node** — `package.json`: name `{_v(n['name'])}`, version {_v(n['version'])}")
