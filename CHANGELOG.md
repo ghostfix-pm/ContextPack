@@ -6,6 +6,8 @@ All notable changes to ContextPack are documented here.
 
 - Detect Go modules and Java Maven/Gradle builds; infer their build and
   test commands and document parsing limits.
+- Detect PHP Composer and Ruby Bundler projects, report manifest and lock
+  metadata, infer available test commands, and document parser limits.
 
 ## 0.2.0 — 2026-11-25
 

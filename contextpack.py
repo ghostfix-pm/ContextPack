@@ -392,6 +392,133 @@ def detect_java(root: Path, files: list[Path]) -> dict | None:
     }
 
 
+def _composer_package_count(packages: dict) -> int:
+    platform_packages = {"php", "hhvm", "composer-plugin-api", "composer-runtime-api"}
+    return sum(
+        1 for name in packages
+        if isinstance(name, str)
+        and name.lower() not in platform_packages
+        and not name.lower().startswith(("ext-", "lib-"))
+    )
+
+
+def detect_php(root: Path, files: list[Path]) -> dict | None:
+    composer = root / "composer.json"
+    has_composer = is_regular_file(composer, root)
+    composer_files = [p for p in files if p.name == "composer.json"]
+    php_files = [p for p in files if p.suffix.lower() == ".php"]
+    if not has_composer and not php_files:
+        return None
+
+    data: dict = {}
+    if has_composer:
+        try:
+            parsed = json.loads(read_text(composer))
+            data = parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            pass
+    require = data.get("require", {})
+    require_dev = data.get("require-dev", {})
+    require = require if isinstance(require, dict) else {}
+    require_dev = require_dev if isinstance(require_dev, dict) else {}
+    scripts = data.get("scripts", {})
+    scripts = scripts if isinstance(scripts, dict) else {}
+
+    lockfile = root / "composer.lock"
+    locked_count = None
+    if is_regular_file(lockfile, root):
+        try:
+            lock_data = json.loads(read_text(lockfile, 2_000_000))
+            if isinstance(lock_data, dict):
+                locked_count = sum(
+                    len(lock_data.get(key, []))
+                    for key in ("packages", "packages-dev")
+                    if isinstance(lock_data.get(key, []), list)
+                )
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return {
+        "manifest": "composer.json" if has_composer else None,
+        "manifest_count": max(len(composer_files), int(has_composer)),
+        "name": data.get("name"),
+        "version": data.get("version"),
+        "php_constraint": require.get("php"),
+        "dependencies_count": _composer_package_count(require),
+        "dev_dependencies_count": _composer_package_count(require_dev),
+        "scripts": sorted(scripts),
+        "lockfile": "composer.lock" if is_regular_file(lockfile, root) else None,
+        "locked_dependencies_count": locked_count,
+        "php_files": len(php_files),
+    }
+
+
+def detect_ruby(root: Path, files: list[Path]) -> dict | None:
+    gemfiles = sorted(
+        (p for p in files if p.name == "Gemfile"),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    gemspecs = sorted(p for p in files if p.suffix == ".gemspec")
+    ruby_files = [p for p in files if p.suffix.lower() == ".rb"]
+    if not gemfiles and not gemspecs and not ruby_files:
+        return None
+
+    gemfile_text = read_text(gemfiles[0], 50_000) if gemfiles else ""
+    gem_names = set(re.findall(
+        r"^\s*gem\s+['\"]([^'\"]+)['\"]", gemfile_text, flags=re.M
+    ))
+    ruby_version_match = re.search(
+        r"^\s*ruby\s+['\"]([^'\"]+)['\"]", gemfile_text, flags=re.M
+    )
+    gem_names.update(
+        name
+        for gemspec in gemspecs
+        for name in re.findall(
+            r"\b(?:spec|s)\.add_(?:runtime_)?dependency\s+['\"]([^'\"]+)['\"]",
+            read_text(gemspec, 50_000),
+        )
+    )
+    name = version = None
+    if gemspecs:
+        text = read_text(gemspecs[0], 50_000)
+        match = re.search(r"\b(?:spec|s)\.name\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if match:
+            name = match.group(1)
+        match = re.search(r"\b(?:spec|s)\.version\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if match:
+            version = match.group(1)
+
+    lockfile = root / "Gemfile.lock"
+    locked_count = None
+    if is_regular_file(lockfile, root):
+        in_specs = False
+        locked_names = set()
+        for line in read_text(lockfile, 50_000).splitlines():
+            if line.strip() == "specs:":
+                in_specs = True
+                continue
+            if in_specs:
+                match = re.match(r"^    ([^\s(]+)\s+\(", line)
+                if match:
+                    locked_names.add(match.group(1))
+                elif line and not line.startswith(" "):
+                    break
+        locked_count = len(locked_names)
+
+    return {
+        "manifest_count": len(gemfiles) + len(gemspecs),
+        "gemfile": rel(root, gemfiles[0]) if gemfiles else None,
+        "name": name,
+        "version": version,
+        "ruby_constraint": ruby_version_match.group(1) if ruby_version_match else None,
+        "dependencies_count": len(gem_names),
+        "direct_dependencies": sorted(gem_names)[:10],
+        "lockfile": "Gemfile.lock" if is_regular_file(lockfile, root) else None,
+        "locked_dependencies_count": locked_count,
+        "ruby_files": len(ruby_files),
+    }
+
+
 def detect_python(root: Path, files: list[Path]) -> dict | None:
     pyproject = root / "pyproject.toml"
     has_pyproject = is_regular_file(pyproject, root)
@@ -538,6 +665,18 @@ def detect_build(root: Path, files: list[Path], stacks: dict) -> dict:
         inferred += ["mvn package", "mvn test"]
     if java.get("gradle_projects"):
         inferred += ["gradle build", "gradle test"]
+    php = stacks.get("php", {})
+    if php.get("manifest"):
+        inferred.append("composer install")
+        if "test" in php.get("scripts", []):
+            inferred.append("composer test")
+    ruby = stacks.get("ruby", {})
+    if ruby.get("gemfile"):
+        inferred.append("bundle install")
+        if any(p.name == "Rakefile" for p in files):
+            inferred.append("bundle exec rake test")
+        elif any("spec" in p.parts and p.suffix.lower() == ".rb" for p in files):
+            inferred.append("bundle exec rspec")
     if stacks.get("dotnet"):
         inferred += ["dotnet build", "dotnet test"]
     if stacks.get("python"):
@@ -603,7 +742,8 @@ def collect(root: Path, max_files: int = 400) -> dict:
                                                "branch": None, "head": None, "dirty_count": None}
     stacks: dict = {}
     for key, fn in (("rust", detect_rust), ("go", detect_go),
-                    ("java", detect_java), ("python", detect_python),
+                    ("java", detect_java), ("php", detect_php),
+                    ("ruby", detect_ruby), ("python", detect_python),
                     ("dotnet", detect_dotnet), ("node", detect_node),
                     ("flutter", detect_flutter), ("powershell", detect_powershell)):
         val = fn(root, files) if root.is_dir() else None
@@ -710,6 +850,41 @@ def render_markdown(d: dict) -> str:
             )
         if not j["maven_projects"] and not j["gradle_projects"]:
             lines.append("  - No Maven or Gradle build file detected.")
+    if "php" in stacks:
+        p = stacks["php"]
+        manifest = f"`{p['manifest']}`" if p.get("manifest") else "no Composer manifest"
+        details = [f"{p['php_files']} .php files"]
+        if p.get("name"):
+            details.insert(0, f"project `{p['name']}`")
+        if p.get("version"):
+            details.append(f"version {p['version']}")
+        if p.get("php_constraint"):
+            details.append(f"requires PHP {p['php_constraint']}")
+        if p.get("dependencies_count") is not None:
+            details.append(f"{p['dependencies_count']} runtime dependencies")
+        if p.get("dev_dependencies_count") is not None:
+            details.append(f"{p['dev_dependencies_count']} dev dependencies")
+        if p.get("locked_dependencies_count") is not None:
+            details.append(f"{p['locked_dependencies_count']} locked packages")
+        lines.append(f"- **PHP** — {manifest}: " + ", ".join(details))
+        if p.get("scripts"):
+            lines.append(f"  - Composer scripts: {', '.join(p['scripts'])}")
+    if "ruby" in stacks:
+        r = stacks["ruby"]
+        manifest = f"`{r['gemfile']}`" if r.get("gemfile") else "no Gemfile"
+        details = [f"{r['ruby_files']} .rb files"]
+        if r.get("name"):
+            details.insert(0, f"project `{r['name']}`")
+        if r.get("version"):
+            details.append(f"version {r['version']}")
+        if r.get("ruby_constraint"):
+            details.append(f"requires Ruby {r['ruby_constraint']}")
+        details.append(f"{r['dependencies_count']} declared gems")
+        if r.get("locked_dependencies_count") is not None:
+            details.append(f"{r['locked_dependencies_count']} locked gems")
+        lines.append(f"- **Ruby** — {manifest}: " + ", ".join(details))
+        if r.get("direct_dependencies"):
+            lines.append(f"  - Gems: {', '.join(r['direct_dependencies'])}")
     if "python" in stacks:
         p = stacks["python"]
         bits = [f"{p['python_files']} .py files"]

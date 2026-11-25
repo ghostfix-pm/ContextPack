@@ -132,6 +132,81 @@ dependencies {
             self.assertIn("gradle build", data["build"]["inferred_commands"])
 
 
+class TestPHPFixture(unittest.TestCase):
+    def test_composer_metadata_and_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "composer.json", json.dumps({
+                "name": "example/demo",
+                "version": "1.2.3",
+                "require": {
+                    "php": ">=8.2",
+                    "ext-json": "*",
+                    "psr/log": "^3.0",
+                },
+                "require-dev": {"phpunit/phpunit": "^11.0"},
+                "scripts": {"test": "phpunit", "lint": "php -l src"},
+            }))
+            write(root, "composer.lock", json.dumps({
+                "packages": [{"name": "psr/log"}],
+                "packages-dev": [{"name": "phpunit/phpunit"}, {"name": "sebastian/diff"}],
+            }))
+            write(root, "src/Demo.php", "<?php class Demo {}\n")
+            data = contextpack.collect(root)
+            php = data["stacks"]["php"]
+            self.assertEqual(php["name"], "example/demo")
+            self.assertEqual(php["version"], "1.2.3")
+            self.assertEqual(php["php_constraint"], ">=8.2")
+            self.assertEqual(php["dependencies_count"], 1)
+            self.assertEqual(php["dev_dependencies_count"], 1)
+            self.assertEqual(php["locked_dependencies_count"], 3)
+            self.assertEqual(php["php_files"], 1)
+            self.assertIn("composer install", data["build"]["inferred_commands"])
+            self.assertIn("composer test", data["build"]["inferred_commands"])
+            self.assertIn("Composer scripts: lint, test",
+                          contextpack.render_markdown(data))
+
+
+class TestRubyFixture(unittest.TestCase):
+    def test_bundler_and_gemspec_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "Gemfile", """source "https://rubygems.org"
+ruby ">= 3.1"
+gem "rack", "~> 3.0"
+gem "rspec", "~> 3.13"
+gemspec
+""")
+            write(root, "demo.gemspec", """Gem::Specification.new do |spec|
+  spec.name = "demo"
+  spec.version = "2.1.0"
+  spec.add_dependency "json", ">= 2"
+end
+""")
+            write(root, "Gemfile.lock", """GEM
+  remote: https://rubygems.org/
+  specs:
+    json (2.7.0)
+    rack (3.1.0)
+    rspec (3.13.0)
+  DEPENDENCIES
+    rack
+    rspec
+""")
+            write(root, "Rakefile", "task :test\n")
+            write(root, "test/demo_test.rb", "puts 'test'\n")
+            data = contextpack.collect(root)
+            ruby = data["stacks"]["ruby"]
+            self.assertEqual(ruby["name"], "demo")
+            self.assertEqual(ruby["version"], "2.1.0")
+            self.assertEqual(ruby["ruby_constraint"], ">= 3.1")
+            self.assertEqual(ruby["dependencies_count"], 3)
+            self.assertEqual(ruby["locked_dependencies_count"], 3)
+            self.assertIn("bundle install", data["build"]["inferred_commands"])
+            self.assertIn("bundle exec rake test", data["build"]["inferred_commands"])
+            self.assertIn("project `demo`", contextpack.render_markdown(data))
+
+
 class TestPythonGplFixture(unittest.TestCase):
     def test_python_and_gpl_detected_not_assumed(self):
         with tempfile.TemporaryDirectory() as td:
