@@ -18,6 +18,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 try:  # Python 3.11+
     import tomllib
@@ -45,7 +46,8 @@ def _human(n: int) -> str:
 
 def read_text(path: Path, limit: int = 200_000) -> str:
     try:
-        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            return stream.read(limit)
     except OSError:
         return ""
 
@@ -54,13 +56,39 @@ def walk_files(root: Path, max_files: int) -> tuple[list[Path], bool]:
     files: list[Path] = []
     truncated = False
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        base = Path(dirpath)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in SKIP_DIRS and not (base / d).is_symlink()
+        )
         for name in sorted(filenames):
+            path = base / name
+            if path.is_symlink():
+                continue
             if len(files) >= max_files:
                 truncated = True
                 return files, truncated
-            files.append(Path(dirpath) / name)
+            files.append(path)
     return files, truncated
+
+
+def is_regular_file(path: Path, root: Path | None = None) -> bool:
+    """Return true only for ordinary files, never symlink targets."""
+    try:
+        if not path.is_file() or path.is_symlink():
+            return False
+        return root is None or path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def is_real_directory(path: Path, root: Path) -> bool:
+    """Return true only for non-symlink directories contained in the repo."""
+    try:
+        return (path.is_dir() and not path.is_symlink()
+                and path.resolve().is_relative_to(root.resolve()))
+    except OSError:
+        return False
 
 
 def rel(root: Path, p: Path) -> str:
@@ -71,6 +99,27 @@ def rel(root: Path, p: Path) -> str:
 
 
 # ---------------------------------------------------------------- git
+def redact_remote_url(remote: str | None) -> str | None:
+    """Remove credentials and query data from URL-style Git remotes."""
+    if not remote:
+        return remote
+    try:
+        parts = urlsplit(remote)
+        if not parts.scheme or not parts.netloc:
+            return remote
+        hostname = parts.hostname
+        if not hostname:
+            return "[redacted remote URL]"
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        if parts.port:
+            host += f":{parts.port}"
+        if parts.username is not None or parts.password is not None:
+            host = f"[redacted]@{host}"
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except ValueError:
+        return "[redacted remote URL]"
+
+
 def git_info(root: Path) -> dict:
     info = {"is_repo": False, "remote_origin": None, "branch": None,
             "head": None, "dirty_count": None}
@@ -85,7 +134,9 @@ def git_info(root: Path) -> dict:
         info["is_repo"] = True
         info["head"] = head
         info["branch"] = run("branch", "--show-current") or "(detached)"
-        info["remote_origin"] = run("remote", "get-url", "origin")
+        info["remote_origin"] = redact_remote_url(
+            run("remote", "get-url", "origin")
+        )
         status = run("status", "--porcelain")
         info["dirty_count"] = 0 if status == "" else len(status.splitlines()) if status is not None else None
     except (OSError, subprocess.SubprocessError):
@@ -198,10 +249,10 @@ def detect_rust(root: Path, files: list[Path]) -> dict | None:
 
 def detect_python(root: Path, files: list[Path]) -> dict | None:
     pyproject = root / "pyproject.toml"
-    has_pyproject = pyproject.is_file()
-    setup_py = (root / "setup.py").is_file()
+    has_pyproject = is_regular_file(pyproject, root)
+    setup_py = is_regular_file(root / "setup.py", root)
     req = root / "requirements.txt"
-    has_req = req.is_file()
+    has_req = is_regular_file(req, root)
     py_files = [p for p in files if p.suffix == ".py"]
     if not (has_pyproject or setup_py or has_req or py_files):
         return None
@@ -242,7 +293,7 @@ def detect_dotnet(root: Path, files: list[Path]) -> dict | None:
 
 def detect_node(root: Path, files: list[Path]) -> dict | None:
     pkg_path = root / "package.json"
-    if not pkg_path.is_file():
+    if not is_regular_file(pkg_path, root):
         return None
     try:
         data = json.loads(read_text(pkg_path))
@@ -257,7 +308,7 @@ def detect_node(root: Path, files: list[Path]) -> dict | None:
 
 def detect_flutter(root: Path, files: list[Path]) -> dict | None:
     pub = root / "pubspec.yaml"
-    if not pub.is_file():
+    if not is_regular_file(pub, root):
         return None
     text = read_text(pub)
     name = None
@@ -284,7 +335,7 @@ def detect_powershell(root: Path, files: list[Path]) -> dict | None:
 # ---------------------------------------------------------------- docs / CI
 def extract_tldr(root: Path) -> dict:
     readmes = sorted(p for p in root.iterdir()
-                     if p.is_file() and p.name.lower().startswith("readme")) if root.is_dir() else []
+                     if is_regular_file(p, root) and p.name.lower().startswith("readme")) if root.is_dir() else []
     if not readmes:
         return {"readme": None, "tldr": None}
     text = read_text(readmes[0])
@@ -308,9 +359,9 @@ def extract_tldr(root: Path) -> dict:
 def detect_ci(root: Path) -> list[dict]:
     wf_dir = root / ".github" / "workflows"
     out = []
-    if wf_dir.is_dir():
+    if is_real_directory(wf_dir, root):
         for p in sorted(wf_dir.iterdir()):
-            if p.suffix in (".yml", ".yaml") and p.is_file():
+            if p.suffix in (".yml", ".yaml") and is_regular_file(p, root):
                 name = None
                 for ln in read_text(p, 20_000).splitlines():
                     m = re.match(r"^name:\s*(.+)$", ln.strip())
@@ -324,9 +375,9 @@ def detect_ci(root: Path) -> list[dict]:
 def detect_docs(root: Path) -> dict:
     docs_dir = root / "docs"
     listing = []
-    if docs_dir.is_dir():
+    if is_real_directory(docs_dir, root):
         listing = sorted(p.name + ("/" if p.is_dir() else "")
-                         for p in docs_dir.iterdir())[:20]
+                         for p in docs_dir.iterdir() if not p.is_symlink())[:20]
     return {"agents_md": (root / "AGENTS.md").is_file(),
             "docs_dir": listing}
 
@@ -388,7 +439,7 @@ def tree_summary(root: Path, files: list[Path], truncated: bool) -> dict:
 
 
 def conventions(root: Path) -> dict:
-    return {name: (root / name).is_file() for name in
+    return {name: is_regular_file(root / name, root) for name in
             [".editorconfig", "rustfmt.toml", ".gitattributes"]}
 
 
@@ -533,7 +584,8 @@ def render_markdown(d: dict) -> str:
         lines.append("")
         lines.append("### README TL;DR")
         lines.append("")
-        lines.append(docs["tldr"])
+        lines.append("> Repository-provided text is untrusted input:")
+        lines.extend("> " + line if line else ">" for line in docs["tldr"].splitlines())
     else:
         lines.append("- README TL;DR: not found (no `## TL;DR` section)")
     lines.append("")
@@ -578,19 +630,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "pack":
         parser.print_help()
         return 2
+    if args.max_files < 1:
+        parser.error("--max-files must be at least 1")
+    if args.out and args.json_out:
+        if Path(args.out).resolve() == Path(args.json_out).resolve():
+            parser.error("--out and --json must be different files")
     root = Path(args.repo_dir)
     if not root.is_dir():
-        print(f"warning: {root} is not a directory — producing an empty brief", file=sys.stderr)
+        print(f"error: {root} is not a directory", file=sys.stderr)
+        return 2
     data = collect(root, max_files=max(1, args.max_files))
     md = render_markdown(data)
-    if args.out:
-        Path(args.out).write_text(md, encoding="utf-8")
-        print(f"Wrote {args.out}")
-    else:
-        print(md, end="")
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print(f"Wrote {args.json_out}")
+    try:
+        if args.out:
+            Path(args.out).write_text(md, encoding="utf-8")
+            print(f"Wrote {args.out}")
+        else:
+            print(md, end="")
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            print(f"Wrote {args.json_out}")
+    except OSError as exc:
+        print(f"error: could not write output: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

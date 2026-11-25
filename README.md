@@ -89,8 +89,12 @@ presence.
   workflow `name:` values are read with simple patterns, not full
   parsers.
 - The scan skips heavy directories (`.git`, `node_modules`, `target`,
-  virtualenvs, caches) and caps the file count; very large repos
-  should raise `--max-files` deliberately.
+  virtualenvs, caches) and symlinks, reads only a bounded amount from
+  each text file, and caps the file count; very large repos should raise
+  `--max-files` deliberately.
+- URL-style Git remotes are included without embedded credentials or
+  query strings. README TL;DR text is quoted and marked as untrusted
+  repository input in the generated brief.
 
 ## Development
 
