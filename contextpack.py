@@ -355,12 +355,39 @@ def _gradle_dependency_count(text: str) -> int | None:
     ))
 
 
+def _has_kotlin_plugin(text: str) -> bool:
+    return bool(re.search(
+        r"org\.jetbrains\.kotlin|kotlin-maven-plugin|"
+        r"kotlin\(\s*['\"][^'\"]+['\"]\s*\)",
+        text,
+        flags=re.I,
+    ))
+
+
 def detect_java(root: Path, files: list[Path]) -> dict | None:
     maven_files = sorted(p for p in files if p.name == "pom.xml")
     gradle_files = sorted(
         p for p in files if p.name in ("build.gradle", "build.gradle.kts")
     )
     java_files = [p for p in files if p.suffix.lower() == ".java"]
+    if not java_files:
+        kotlin_sources = any(
+            p.suffix.lower() in (".kt", ".kts")
+            and p.name not in ("build.gradle.kts", "settings.gradle.kts")
+            for p in files
+        )
+        if kotlin_sources:
+            maven_files = []
+            gradle_files = []
+        else:
+            maven_files = [
+                p for p in maven_files
+                if not _has_kotlin_plugin(read_text(p, 50_000))
+            ]
+            gradle_files = [
+                p for p in gradle_files
+                if not _has_kotlin_plugin(read_text(p, 50_000))
+            ]
     if not maven_files and not gradle_files and not java_files:
         return None
 
@@ -389,6 +416,162 @@ def detect_java(root: Path, files: list[Path]) -> dict | None:
         "java_files": len(java_files),
         "maven_projects": maven_projects,
         "gradle_projects": gradle_projects,
+    }
+
+
+def detect_kotlin(root: Path, files: list[Path]) -> dict | None:
+    kotlin_files = [
+        p for p in files
+        if p.suffix.lower() in (".kt", ".kts")
+        and p.name not in ("build.gradle.kts", "settings.gradle.kts")
+    ]
+    gradle_files = sorted(
+        p for p in files
+        if p.name in (
+            "build.gradle", "build.gradle.kts",
+            "settings.gradle", "settings.gradle.kts",
+        )
+    )
+    maven_files = sorted(p for p in files if p.name == "pom.xml")
+    gradle_data = [
+        (p, read_text(p, 50_000)) for p in gradle_files
+    ]
+    maven_data = [
+        (p, read_text(p, 50_000)) for p in maven_files
+    ]
+    if not kotlin_files and not any(
+        _has_kotlin_plugin(text) for _, text in gradle_data + maven_data
+    ):
+        return None
+
+    compiler_version = None
+    project_name = None
+    gradle_builds = []
+    for path, text in gradle_data:
+        if path.name.startswith("build.gradle"):
+            gradle_builds.append(path)
+        if project_name is None:
+            match = re.search(
+                r"^\s*rootProject\.name\s*=\s*['\"]([^'\"]+)['\"]",
+                text,
+                flags=re.M,
+            )
+            if match:
+                project_name = match.group(1)
+        if compiler_version is None:
+            patterns = (
+                r"(?:kotlin\(\s*['\"][^'\"]+['\"]\s*\)|"
+                r"id\s*\(?\s*['\"]org\.jetbrains\.kotlin(?:\.[^'\"]+)?['\"]\s*\)?)"
+                r"[^\n]*?version\s*['\"]([^'\"]+)['\"]",
+                r"kotlinVersion\s*=\s*['\"]([^'\"]+)['\"]",
+            )
+            for pattern in patterns:
+                match = re.search(pattern, text, flags=re.I)
+                if match:
+                    compiler_version = match.group(1)
+                    break
+
+    maven_projects = []
+    for path, text in maven_data:
+        if _has_kotlin_plugin(text):
+            maven_projects.append(path)
+            if compiler_version is None:
+                match = re.search(
+                    r"<kotlin\.version>\s*([^<]+)\s*</kotlin\.version>",
+                    text,
+                    flags=re.I,
+                )
+                if match:
+                    compiler_version = match.group(1).strip()
+            if project_name is None:
+                project_name = _maven_value(text, "artifactId")
+
+    if not gradle_builds and not maven_projects and not kotlin_files:
+        return None
+
+    gradle_counts = [
+        _gradle_dependency_count(read_text(path, 50_000))
+        for path in gradle_builds
+    ]
+    maven_counts = [
+        _maven_dependency_count(read_text(path, 50_000))
+        for path in maven_projects
+    ]
+    dependency_counts = [
+        count for count in gradle_counts + maven_counts if count is not None
+    ]
+    return {
+        "name": project_name,
+        "compiler_version": compiler_version,
+        "kotlin_files": len(kotlin_files),
+        "gradle_files": [rel(root, p) for p in gradle_builds[:10]],
+        "maven_files": [rel(root, p) for p in maven_projects[:10]],
+        "dependencies_count": sum(dependency_counts) if dependency_counts else None,
+    }
+
+
+def detect_swift(root: Path, files: list[Path]) -> dict | None:
+    package_files = sorted(p for p in files if p.name == "Package.swift")
+    package_manifest = root / "Package.swift"
+    has_package_manifest = is_regular_file(package_manifest, root)
+    swift_files = [
+        p for p in files
+        if p.suffix.lower() == ".swift" and p.name != "Package.swift"
+    ]
+    xcode_projects = sorted({
+        rel(root, p.parent)
+        for p in files
+        if p.name == "project.pbxproj"
+        and any(part.endswith(".xcodeproj") for part in p.parts)
+    })
+    xcode_workspaces = sorted({
+        rel(root, p.parent)
+        for p in files
+        if p.name == "contents.xcworkspacedata"
+        and any(part.endswith(".xcworkspace") for part in p.parts)
+    })
+    if not has_package_manifest and not swift_files and not xcode_projects and not xcode_workspaces:
+        return None
+
+    manifest_count = max(len(package_files), int(has_package_manifest))
+    package_text = read_text(package_manifest, 50_000) if has_package_manifest else ""
+    name_match = re.search(r"\bname\s*:\s*['\"]([^'\"]+)['\"]", package_text)
+    tools_match = re.search(
+        r"swift-tools-version:\s*([0-9]+(?:\.[0-9]+){1,2})",
+        package_text,
+        flags=re.I,
+    )
+    resolved_files = [
+        p for p in files
+        if p.name == "Package.resolved"
+        and ("swiftpm" in p.parts or p.parent == root)
+    ]
+    locked_count = None
+    if resolved_files:
+        try:
+            resolved = json.loads(read_text(resolved_files[0], 200_000))
+            pins = resolved.get("pins", []) if isinstance(resolved, dict) else []
+            if not pins and isinstance(resolved, dict):
+                pins = resolved.get("object", {}).get("pins", [])
+            if isinstance(pins, list):
+                locked_count = len(pins)
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            pass
+
+    return {
+        "name": name_match.group(1) if name_match else None,
+        "tools_version": tools_match.group(1) if tools_match else None,
+        "package_manifest_count": manifest_count,
+        "dependencies_count": len(re.findall(r"\.package\s*\(", package_text)),
+        "target_count": len(re.findall(
+            r"\.(?:testTarget|executableTarget|target|macro)\s*\(",
+            package_text,
+        )),
+        "has_test_target": bool(re.search(r"\.testTarget\s*\(", package_text)),
+        "locked_dependencies_count": locked_count,
+        "swift_files": len(swift_files),
+        "xcode_projects": xcode_projects[:10],
+        "xcode_workspaces": xcode_workspaces[:10],
     }
 
 
@@ -665,6 +848,16 @@ def detect_build(root: Path, files: list[Path], stacks: dict) -> dict:
         inferred += ["mvn package", "mvn test"]
     if java.get("gradle_projects"):
         inferred += ["gradle build", "gradle test"]
+    kotlin = stacks.get("kotlin", {})
+    if kotlin.get("gradle_files"):
+        inferred += ["gradle build", "gradle test"]
+    if kotlin.get("maven_files"):
+        inferred += ["mvn package", "mvn test"]
+    swift = stacks.get("swift", {})
+    if swift.get("package_manifest_count"):
+        inferred += ["swift build", "swift test"]
+    elif swift.get("xcode_projects") or swift.get("xcode_workspaces"):
+        inferred.append("xcodebuild -list")
     php = stacks.get("php", {})
     if php.get("manifest"):
         inferred.append("composer install")
@@ -704,7 +897,7 @@ def detect_build(root: Path, files: list[Path], stacks: dict) -> dict:
                         targets.append(m.group(1))
             extra["makefiles"].append({"file": rel(root, p), "targets": targets})
     extra["gate_files"].sort()
-    return {"inferred_commands": inferred, **extra}
+    return {"inferred_commands": list(dict.fromkeys(inferred)), **extra}
 
 
 def tree_summary(root: Path, files: list[Path], truncated: bool) -> dict:
@@ -742,7 +935,8 @@ def collect(root: Path, max_files: int = 400) -> dict:
                                                "branch": None, "head": None, "dirty_count": None}
     stacks: dict = {}
     for key, fn in (("rust", detect_rust), ("go", detect_go),
-                    ("java", detect_java), ("php", detect_php),
+                    ("java", detect_java), ("kotlin", detect_kotlin),
+                    ("swift", detect_swift), ("php", detect_php),
                     ("ruby", detect_ruby), ("python", detect_python),
                     ("dotnet", detect_dotnet), ("node", detect_node),
                     ("flutter", detect_flutter), ("powershell", detect_powershell)):
@@ -850,6 +1044,40 @@ def render_markdown(d: dict) -> str:
             )
         if not j["maven_projects"] and not j["gradle_projects"]:
             lines.append("  - No Maven or Gradle build file detected.")
+    if "kotlin" in stacks:
+        k = stacks["kotlin"]
+        details = [f"{k['kotlin_files']} Kotlin source files"]
+        if k.get("name"):
+            details.insert(0, f"project `{k['name']}`")
+        if k.get("compiler_version"):
+            details.append(f"Kotlin {k['compiler_version']}")
+        if k.get("dependencies_count") is not None:
+            details.append(f"{k['dependencies_count']} declared dependencies")
+        lines.append("- **Kotlin** — " + ", ".join(details))
+        if k.get("gradle_files"):
+            gradle_paths = ", ".join("`" + p + "`" for p in k["gradle_files"])
+            lines.append(f"  - Gradle: {gradle_paths}")
+        if k.get("maven_files"):
+            maven_paths = ", ".join("`" + p + "`" for p in k["maven_files"])
+            lines.append(f"  - Maven: {maven_paths}")
+    if "swift" in stacks:
+        s = stacks["swift"]
+        details = [f"{s['swift_files']} Swift source files"]
+        if s.get("name"):
+            details.insert(0, f"package `{s['name']}`")
+        if s.get("tools_version"):
+            details.append(f"tools version {s['tools_version']}")
+        if s.get("package_manifest_count"):
+            details.append(f"{s['package_manifest_count']} Package.swift manifest(s)")
+            details.append(f"{s['dependencies_count']} declared packages")
+            details.append(f"{s['target_count']} targets")
+        if s.get("locked_dependencies_count") is not None:
+            details.append(f"{s['locked_dependencies_count']} locked packages")
+        lines.append("- **Swift** — " + ", ".join(details))
+        for project in s.get("xcode_projects", []):
+            lines.append(f"  - Xcode project: `{project}`")
+        for workspace in s.get("xcode_workspaces", []):
+            lines.append(f"  - Xcode workspace: `{workspace}`")
     if "php" in stacks:
         p = stacks["php"]
         manifest = f"`{p['manifest']}`" if p.get("manifest") else "no Composer manifest"
