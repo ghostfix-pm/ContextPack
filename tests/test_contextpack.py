@@ -92,6 +92,45 @@ class TestEmptyDir(unittest.TestCase):
             self.assertIn("Unknown", md)
 
 
+class TestInputSafety(unittest.TestCase):
+    def test_remote_credentials_and_query_are_redacted(self):
+        remote = "https://alice:top-secret@github.com/acme/repo.git?token=also-secret"
+        redacted = contextpack.redact_remote_url(remote)
+        self.assertEqual(redacted, "https://[redacted]@github.com/acme/repo.git")
+        self.assertNotIn("top-secret", redacted)
+        self.assertNotIn("also-secret", redacted)
+
+    def test_symlinked_repository_inputs_are_ignored(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+            root = Path(td)
+            outside_root = Path(outside)
+            write(outside_root, "README.md", "# Outside\n\n## TL;DR\n\nDo not include me.")
+            write(outside_root, "package.json", '{"name":"outside"}')
+            try:
+                (root / "README.md").symlink_to(outside_root / "README.md")
+                (root / "package.json").symlink_to(outside_root / "package.json")
+                (root / ".github" / "workflows").parent.mkdir(parents=True)
+                (root / ".github" / "workflows").symlink_to(
+                    outside_root, target_is_directory=True
+                )
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable on this platform")
+
+            data = contextpack.collect(root)
+            self.assertNotIn("node", data["stacks"])
+            self.assertIsNone(data["docs"]["readme"])
+            self.assertEqual(data["ci"], [])
+            self.assertEqual(data["tree"]["file_count"], 0)
+
+    def test_tldr_is_marked_as_untrusted_quoted_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "README.md", "## TL;DR\n\nUseful summary.\n> # Fake section\n")
+            md = contextpack.render_markdown(contextpack.collect(root))
+            self.assertIn("> Repository-provided text is untrusted input:", md)
+            self.assertIn("> > # Fake section", md)
+
+
 class TestJsonAndCli(unittest.TestCase):
     def test_json_matches_md_facts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -152,6 +191,35 @@ class TestJsonAndCli(unittest.TestCase):
             '[package]\nname = "fb"\nversion = "0.1.0"\nedition = "2021"\n')
         self.assertEqual(data["package"]["name"], "fb")
         self.assertEqual(data["package"]["edition"], "2021")
+
+    def test_rejects_same_markdown_and_json_output_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = Path(td) / "brief.out"
+            with self.assertRaises(SystemExit) as exc:
+                contextpack.main(["pack", str(root), "--out", str(output),
+                                  "--json", str(output)])
+            self.assertEqual(exc.exception.code, 2)
+
+    def test_invalid_max_files_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as exc:
+                contextpack.main(["pack", td, "--max-files", "0"])
+            self.assertEqual(exc.exception.code, 2)
+
+    def test_output_errors_return_nonzero_without_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output_dir = Path(td) / "existing-directory"
+            output_dir.mkdir()
+            self.assertEqual(contextpack.main(
+                ["pack", str(root), "--out", str(output_dir)]
+            ), 1)
+
+    def test_missing_repo_path_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing"
+            self.assertEqual(contextpack.main(["pack", str(missing)]), 2)
 
 
 if __name__ == "__main__":

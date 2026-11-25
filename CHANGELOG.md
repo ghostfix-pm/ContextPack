@@ -2,6 +2,14 @@
 
 All notable changes to ContextPack are documented here.
 
+## Unreleased
+
+- Redact credentials and query strings from URL-style Git remotes.
+- Skip symlinked inputs, quote README TL;DR text as untrusted input, and
+  bound text reads to avoid pulling external files or loading huge files.
+- Reject invalid output settings and missing repo paths with clear
+  non-zero exits; add regression coverage for these cases.
+
 ## 0.1.0 — 2026-10-24
 
 - Initial release.
