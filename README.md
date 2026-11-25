@@ -18,6 +18,13 @@ of them from the files in the checkout, in one skimmable brief
 
 ## Usage
 
+Install from a checkout with no runtime dependencies:
+
+```console
+python -m pip install .
+contextpack --version
+```
+
 ```console
 python contextpack.py pack <repo-dir> [--out CONTEXT.md] [--json context.json] [--max-files 400]
 ```
@@ -71,7 +78,7 @@ A real-world run on WinDevKit reported: HEAD `882cf43` on branch
 Also detected regardless of stack: git remote/branch/HEAD/dirty count,
 `gate.sh`/`gate.ps1` files, Makefile targets, workflows under
 `.github/workflows/` (with their `name:`), the README `## TL;DR`
-section, AGENTS.md, top-level `docs/`, file counts by extension,
+section, AGENTS.md, top-level `docs/`, the 12 most common file extensions,
 largest files, and `.editorconfig` / `rustfmt.toml` / `.gitattributes`
 presence.
 
@@ -82,8 +89,9 @@ presence.
   own README/AGENTS.md before running anything.
 - License identification is a text-signature guess over the license
   file; the brief always shows the file and its first line so a human
-  (or agent) can confirm it. If no license file exists, the brief says
-  Unknown — it never borrows one from another project.
+  (or agent) can confirm it. Common `UNLICENSE` filenames are supported.
+  If no license file exists, the brief says Unknown — it never borrows
+  one from another project.
 - TOML/YAML parsing is intentionally shallow: on Python 3.10 a small
   fallback parser handles common manifest shapes, and `pubspec.yaml` /
   workflow `name:` values are read with simple patterns, not full

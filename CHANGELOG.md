@@ -9,6 +9,9 @@ All notable changes to ContextPack are documented here.
   bound text reads to avoid pulling external files or loading huge files.
 - Reject invalid output settings and missing repo paths with clear
   non-zero exits; add regression coverage for these cases.
+- Detect standard `UNLICENSE` files and document the tree-summary
+  extension limit; mark repository metadata as untrusted in briefs.
+- Document source installation and smoke-test the installed CLI in CI.
 
 ## 0.1.0 — 2026-10-24
 
