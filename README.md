@@ -73,6 +73,8 @@ A real-world run on WinDevKit reported: HEAD `882cf43` on branch
 | Python | `pyproject.toml` (tomllib on 3.11+, fallback parser on 3.10), `setup.py`, `requirements.txt`, `*.py` | project name/version, requires-python, dependency counts |
 | .NET | `*.csproj`, `*.sln` | TargetFramework(s), solutions |
 | Java | `pom.xml`, `build.gradle(.kts)`, `*.java` | Maven coordinates or Gradle group/version, declared dependencies |
+| Kotlin | `*.kt` / `*.kts`, Gradle Kotlin plugin, Maven Kotlin plugin | project name, compiler version, declared dependencies |
+| Swift | `Package.swift`, `*.swift`, Xcode projects | package/tools version, dependencies, targets, locked packages, Xcode paths |
 | PHP | `composer.json`, `*.php` | package name/version, PHP constraint, runtime/dev requirements, scripts |
 | Ruby | `Gemfile`, `*.gemspec`, `*.rb` | gem name/version, Ruby constraint, declared and locked gems |
 | Node | `package.json` | name, version, script names |
@@ -105,6 +107,8 @@ presence.
   resolved and build files are not fully interpreted.
 - Composer metadata is read from JSON; Ruby Gemfile and gemspec details use
   bounded text patterns. Counts are estimates and do not resolve dependencies.
+- Kotlin Gradle/Maven metadata and Swift package declarations use bounded
+  text patterns; Xcode scheme details are not resolved automatically.
 - The scan skips heavy directories (`.git`, `node_modules`, `target`,
   virtualenvs, caches) and symlinks, reads only a bounded amount from
   each text file, and caps the file count; very large repos should raise

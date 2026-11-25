@@ -132,6 +132,95 @@ dependencies {
             self.assertIn("gradle build", data["build"]["inferred_commands"])
 
 
+class TestKotlinFixtures(unittest.TestCase):
+    def test_gradle_kotlin_project_is_not_mislabeled_java(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "settings.gradle.kts", 'rootProject.name = "demo-kotlin"\n')
+            write(root, "build.gradle.kts", """plugins {
+    id("org.jetbrains.kotlin.jvm") version "2.0.21"
+}
+dependencies {
+    implementation("org.example:lib:1.0")
+}
+""")
+            write(root, "src/main/kotlin/Main.kt", "fun main() = Unit\n")
+            data = contextpack.collect(root)
+            kotlin = data["stacks"]["kotlin"]
+            self.assertEqual(kotlin["name"], "demo-kotlin")
+            self.assertEqual(kotlin["compiler_version"], "2.0.21")
+            self.assertEqual(kotlin["kotlin_files"], 1)
+            self.assertEqual(kotlin["dependencies_count"], 1)
+            self.assertNotIn("java", data["stacks"])
+            self.assertIn("gradle test", data["build"]["inferred_commands"])
+
+    def test_kotlin_maven_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "pom.xml", """<project>
+  <artifactId>kotlin-maven-demo</artifactId>
+  <properties><kotlin.version>1.9.24</kotlin.version></properties>
+  <build><plugins><plugin><artifactId>kotlin-maven-plugin</artifactId></plugin></plugins></build>
+  <dependencies><dependency><artifactId>kotlin-stdlib</artifactId></dependency></dependencies>
+</project>
+""")
+            write(root, "src/main/kotlin/Main.kt", "fun main() = Unit\n")
+            data = contextpack.collect(root)
+            kotlin = data["stacks"]["kotlin"]
+            self.assertEqual(kotlin["name"], "kotlin-maven-demo")
+            self.assertEqual(kotlin["compiler_version"], "1.9.24")
+            self.assertEqual(kotlin["dependencies_count"], 1)
+            self.assertNotIn("java", data["stacks"])
+            self.assertIn("mvn test", data["build"]["inferred_commands"])
+
+
+class TestSwiftFixtures(unittest.TestCase):
+    def test_package_manifest_and_resolved_dependencies(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "Package.swift", """// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(
+    name: "DemoKit",
+    dependencies: [
+        .package(url: "https://example.invalid/library.git", from: "1.0.0"),
+    ],
+    targets: [
+        .target(name: "DemoKit"),
+        .testTarget(name: "DemoKitTests", dependencies: ["DemoKit"]),
+    ]
+)
+""")
+            write(root, "Package.resolved", json.dumps({"version": 2, "pins": [
+                {"identity": "library", "state": {"version": "1.0.0"}},
+            ]}))
+            write(root, "Sources/DemoKit/Demo.swift", "public struct Demo {}\n")
+            write(root, "Tests/DemoKitTests/DemoTests.swift", "import XCTest\n")
+            data = contextpack.collect(root)
+            swift = data["stacks"]["swift"]
+            self.assertEqual(swift["name"], "DemoKit")
+            self.assertEqual(swift["tools_version"], "5.9")
+            self.assertEqual(swift["dependencies_count"], 1)
+            self.assertEqual(swift["target_count"], 2)
+            self.assertTrue(swift["has_test_target"])
+            self.assertEqual(swift["locked_dependencies_count"], 1)
+            self.assertIn("swift build", data["build"]["inferred_commands"])
+            self.assertIn("swift test", data["build"]["inferred_commands"])
+
+    def test_xcode_project_discovery_hint(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write(root, "Demo.xcodeproj/project.pbxproj", "// project\n")
+            write(root, "Sources/Demo.swift", "struct Demo {}\n")
+            data = contextpack.collect(root)
+            swift = data["stacks"]["swift"]
+            self.assertEqual(swift["xcode_projects"], ["Demo.xcodeproj"])
+            self.assertIn(
+                "xcodebuild -list",
+                data["build"]["inferred_commands"],
+            )
+
+
 class TestPHPFixture(unittest.TestCase):
     def test_composer_metadata_and_commands(self):
         with tempfile.TemporaryDirectory() as td:

@@ -8,6 +8,8 @@ All notable changes to ContextPack are documented here.
   test commands and document parsing limits.
 - Detect PHP Composer and Ruby Bundler projects, report manifest and lock
   metadata, infer available test commands, and document parser limits.
+- Detect Kotlin Gradle/Maven and Swift Package Manager/Xcode projects;
+  report versions and dependencies and infer available build/test commands.
 
 ## 0.2.0 — 2026-11-25
 
